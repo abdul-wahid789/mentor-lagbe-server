@@ -849,6 +849,68 @@ app.patch(
   }
 );
 
+app.patch(
+  "/admin/tuitions/:id/approval",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const tuitionsCol = database.collection("tuitions");
+      const { id } = req.params;
+      const approvalStatus = req.body?.approvalStatus;
+      const rejectionNote = String(req.body?.rejectionNote || "").trim();
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ error: true, msg: "Invalid tuition ID" });
+      }
+
+      if (approvalStatus !== "approved" && approvalStatus !== "rejected") {
+        return res.status(400).json({
+          error: true,
+          msg: "approvalStatus must be approved or rejected",
+        });
+      }
+
+      if (approvalStatus === "rejected" && !rejectionNote) {
+        return res.status(400).json({
+          error: true,
+          msg: "Rejection note is required when rejecting",
+        });
+      }
+
+      const updateFields = {
+        approvalStatus,
+        isActive: approvalStatus === "approved",
+        rejectionNote: approvalStatus === "rejected" ? rejectionNote : "",
+        updatedAt: new Date().toISOString(),
+      };
+
+      const result = await tuitionsCol.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updateFields }
+      );
+
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .json({ error: true, msg: "Tuition not found" });
+      }
+
+      return res.status(200).json({
+        error: false,
+        msg: `Tuition ${approvalStatus}`,
+      });
+    } catch (err) {
+      console.error("PATCH /admin/tuitions/:id/approval error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to update tuition approval" });
+    }
+  }
+);
 
 app.patch("/user/profile", verifyToken, async (req, res) => {
   try {
