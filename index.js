@@ -501,6 +501,375 @@ app.get("/user/paid", verifyToken, async (req, res) => {
   }
 });
 
+app.get(
+  "/applications/tutor",
+  verifyToken,
+  requireRole("tutor"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const applicationsCol = database.collection("applications");
+
+      const tutorId = String(req.user?.id || "");
+      const tutorEmail = String(req.user?.email || "").toLowerCase();
+
+      const conditions = [];
+      if (tutorId) {
+        conditions.push({ tutorId });
+      }
+      if (tutorEmail) {
+        conditions.push({ tutorEmail });
+      }
+
+      if (conditions.length === 0) {
+        return res.status(200).json({
+          error: false,
+          msg: "Tutor applications fetched",
+          data: [],
+        });
+      }
+
+      const docs = await applicationsCol
+        .find(conditions.length === 1 ? conditions[0] : { $or: conditions })
+        .sort({ _id: -1 })
+        .toArray();
+
+      const formatted = docs.map((doc) => ({
+        id: String(doc._id),
+        tuitionId: String(doc.tuitionId || ""),
+        tuitionTitle: String(doc.tuitionTitle || "Tuition"),
+        tutorName: String(doc.tutorName || req.user?.name || ""),
+        tutorEmail: String(doc.tutorEmail || tutorEmail),
+        studentName: String(doc.studentName || "Student"),
+        studentEmail: String(doc.studentEmail || ""),
+        studentPhone: String(doc.studentPhone || ""),
+        preferredSchedule: String(doc.preferredSchedule || ""),
+        note: String(doc.note || ""),
+        monthlyFee: Number(doc.monthlyFee || 0),
+        appliedAt: String(doc.appliedAt || ""),
+        status:
+          doc.status === "accepted" || doc.status === "rejected"
+            ? doc.status
+            : "pending",
+      }));
+
+      return res.status(200).json({
+        error: false,
+        msg: "Tutor applications fetched",
+        data: formatted,
+      });
+    } catch (err) {
+      console.error("GET /applications/tutor error:", err);
+      return res.status(500).json({
+        error: true,
+        msg: "Failed to fetch tutor applications",
+      });
+    }
+  }
+);
+
+
+app.delete(
+  "/applications/:id",
+  verifyToken,
+  requireRole("student"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const applicationsCol = database.collection("applications");
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ error: true, msg: "Invalid application ID" });
+      }
+
+      const studentEmail = String(req.user?.email || "").toLowerCase();
+      const studentId = String(req.user?.id || "");
+
+      const existing = await applicationsCol.findOne({
+        _id: new ObjectId(id),
+        $or: [{ studentEmail }, { studentId }],
+      });
+
+      if (!existing) {
+        return res
+          .status(404)
+          .json({ error: true, msg: "Application not found" });
+      }
+
+      await applicationsCol.deleteOne({ _id: new ObjectId(id) });
+
+      return res.status(200).json({
+        error: false,
+        msg: "Application deleted",
+      });
+    } catch (err) {
+      console.error("DELETE /applications/:id error:", err);
+      return res.status(500).json({
+        error: true,
+        msg: "Failed to delete application",
+      });
+    }
+  }
+);
+
+app.patch(
+  "/applications/:id/status",
+  verifyToken,
+  requireRole("tutor"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const applicationsCol = database.collection("applications");
+      const { id } = req.params;
+      const status = req.body?.status;
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ error: true, msg: "Invalid application ID" });
+      }
+
+      if (status !== "accepted" && status !== "rejected") {
+        return res
+          .status(400)
+          .json({ error: true, msg: "Status must be accepted or rejected" });
+      }
+
+      const tutorEmail = String(req.user?.email || "").toLowerCase();
+      const tutorId = String(req.user?.id || "");
+
+      const result = await applicationsCol.updateOne(
+        {
+          _id: new ObjectId(id),
+          $or: [{ tutorEmail }, { tutorId }],
+        },
+        {
+          $set: {
+            status,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .json({ error: true, msg: "Application not found" });
+      }
+
+      return res.status(200).json({
+        error: false,
+        msg: `Application marked as ${status}`,
+      });
+    } catch (err) {
+      console.error("PATCH /applications/:id/status error:", err);
+      return res.status(500).json({
+        error: true,
+        msg: "Failed to update application status",
+      });
+    }
+  }
+);
+
+const FREE_BOOKMARK_LIMIT = 5;
+
+app.get("/tuitions/:id", async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+    }
+
+    const tuition = await database
+      .collection("tuitions")
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!tuition) {
+      return res.status(404).json({ error: true, msg: "Tuition not found" });
+    }
+
+    return res.status(200).json({
+      error: false,
+      msg: "Tuition fetched",
+      data: { ...tuition, _id: String(tuition._id) },
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to fetch tuition" });
+  }
+});
+
+app.post("/applications", verifyToken, requireRole("student"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const { tuitionId, preferredSchedule, phone, note } = req.body || {};
+
+    if (!tuitionId || !ObjectId.isValid(tuitionId)) {
+      return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+    }
+
+    const tuition = await database
+      .collection("tuitions")
+      .findOne({ _id: new ObjectId(tuitionId) });
+
+    if (!tuition) {
+      return res.status(404).json({ error: true, msg: "Tuition not found" });
+    }
+
+    const studentEmail = String(req.user.email || "").toLowerCase();
+    const tutorEmail = String(tuition.tutorEmail || "").toLowerCase();
+
+    const doc = {
+      tuitionId: String(tuitionId),
+      tuitionTitle: tuition.title || "Tuition",
+      tutorId: String(tuition.tutorId || ""),
+      tutorName: tuition.tutorName || "",
+      tutorEmail,
+      studentId: String(req.user.id || ""),
+      studentName: req.user.name || "Student",
+      studentEmail,
+      studentPhone: String(phone || ""),
+      preferredSchedule: String(preferredSchedule || ""),
+      note: String(note || ""),
+      monthlyFee: Number(tuition.monthlyFee || 0),
+      appliedAt: formatDate(new Date()),
+      status: "pending",
+    };
+
+    await database.collection("applications").insertOne(doc);
+    await database
+      .collection("tuitions")
+      .updateOne(
+        { _id: new ObjectId(tuitionId) },
+        { $inc: { applicantsCount: 1 } }
+      );
+
+    return res.status(201).json({
+      error: false,
+      msg: "Application submitted with pending status",
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to submit application" });
+  }
+});
+
+app.get("/bookmarks/mine", verifyToken, requireRole("student"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const studentEmail = String(req.user.email || "").toLowerCase();
+
+    const docs = await database
+      .collection("bookmarks")
+      .find({
+        $or: [{ studentEmail }, { studentId: String(req.user.id || "") }],
+      })
+      .sort({ _id: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      error: false,
+      msg: "Bookmarks fetched",
+      data: docs.map((d) => ({
+        id: String(d._id),
+        tuitionId: String(d.tuitionId),
+        studentEmail: d.studentEmail || studentEmail,
+        createdAt: d.createdAt || "",
+      })),
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to fetch bookmarks" });
+  }
+});
+
+app.post("/bookmarks", verifyToken, requireRole("student"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const bookmarksCol = database.collection("bookmarks");
+    const usersCol = database.collection("user");
+
+    const tuitionId = String(req.body?.tuitionId || "");
+    if (!tuitionId || !ObjectId.isValid(tuitionId)) {
+      return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+    }
+
+    const studentEmail = String(req.user.email || "").toLowerCase();
+
+    const existing = await bookmarksCol.findOne({
+      tuitionId,
+      $or: [{ studentEmail }, { studentId: String(req.user.id || "") }],
+    });
+
+    if (existing) {
+      return res.status(200).json({ error: false, msg: "Already bookmarked" });
+    }
+
+    const userDoc = await usersCol.findOne(
+      buildUserFilter(req.user.id, studentEmail)
+    );
+    const isPro = userDoc?.plan === "pro";
+
+    if (!isPro) {
+      const count = await bookmarksCol.countDocuments({
+        $or: [{ studentEmail }, { studentId: String(req.user.id || "") }],
+      });
+
+      if (count >= FREE_BOOKMARK_LIMIT) {
+        return res.status(403).json({
+          error: true,
+          msg: `Free Students can bookmark up to ${FREE_BOOKMARK_LIMIT} tuitions. Upgrade to Pro Student for unlimited bookmarks.`,
+        });
+      }
+    }
+
+    await bookmarksCol.insertOne({
+      tuitionId,
+      studentId: String(req.user.id || ""),
+      studentEmail,
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(201).json({ error: false, msg: "Tuition bookmarked" });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to bookmark tuition" });
+  }
+});
+
+app.delete(
+  "/bookmarks/:tuitionId",
+  verifyToken,
+  requireRole("student"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const { tuitionId } = req.params;
+      const studentEmail = String(req.user.email || "").toLowerCase();
+
+      await database.collection("bookmarks").deleteOne({
+        tuitionId: String(tuitionId),
+        $or: [{ studentEmail }, { studentId: String(req.user.id || "") }],
+      });
+
+      return res.status(200).json({ error: false, msg: "Bookmark removed" });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to remove bookmark" });
+    }
+  }
+);
+
 app.get("/user", verifyToken, async (req, res) => {
   // try {
   const database = await connectToMongoDB();
