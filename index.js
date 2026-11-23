@@ -615,6 +615,74 @@ app.delete(
   }
 );
 
+app.get(
+  "/applications/mine",
+  verifyToken,
+  requireRole("student"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const applicationsCol = database.collection("applications");
+
+      const studentId = String(req.user?.id || "");
+      const studentEmail = String(req.user?.email || "").toLowerCase();
+
+      const conditions = [];
+      if (studentId) {
+        conditions.push({ studentId });
+      }
+      if (studentEmail) {
+        conditions.push({ studentEmail });
+      }
+
+      if (conditions.length === 0) {
+        return res.status(200).json({
+          error: false,
+          msg: "Student applications fetched",
+          data: [],
+        });
+      }
+
+      const docs = await applicationsCol
+        .find(conditions.length === 1 ? conditions[0] : { $or: conditions })
+        .sort({ _id: -1 })
+        .toArray();
+
+      const formatted = docs.map((doc) => ({
+        id: String(doc._id),
+        tuitionId: String(doc.tuitionId || ""),
+        tuitionTitle: String(doc.tuitionTitle || "Tuition"),
+        tutorName: String(doc.tutorName || ""),
+        tutorEmail: String(doc.tutorEmail || ""),
+        studentName: String(doc.studentName || req.user?.name || "Student"),
+        studentEmail: String(doc.studentEmail || studentEmail),
+        studentPhone: String(doc.studentPhone || ""),
+        preferredSchedule: String(doc.preferredSchedule || ""),
+        note: String(doc.note || ""),
+        monthlyFee: Number(doc.monthlyFee || 0),
+        appliedAt: String(doc.appliedAt || ""),
+        status:
+          doc.status === "accepted" || doc.status === "rejected"
+            ? doc.status
+            : "pending",
+      }));
+
+      return res.status(200).json({
+        error: false,
+        msg: "Student applications fetched",
+        data: formatted,
+      });
+    } catch (err) {
+      console.error("GET /applications/mine error:", err);
+      return res.status(500).json({
+        error: true,
+        msg: "Failed to fetch student applications",
+      });
+    }
+  }
+);
+
+
 app.patch(
   "/applications/:id/status",
   verifyToken,
