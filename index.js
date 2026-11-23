@@ -1648,3 +1648,6 @@ app.get("/user", verifyToken, async (req, res) => {
 app.listen(port, () => {
   console.log(`Mentor Lagbe server running on port ${port}`);
 });
+
+
+export default app;
