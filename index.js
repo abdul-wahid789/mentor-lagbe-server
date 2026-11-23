@@ -683,6 +683,52 @@ app.get(
 );
 
 
+app.patch("/user/profile", verifyToken, async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const usersCol = database.collection("user");
+
+    const name = String(req.body?.name || "").trim();
+    const phone = String(req.body?.phone || "").trim();
+    const bio = String(req.body?.bio || "").trim();
+    const image = String(req.body?.image || "").trim();
+
+    if (!name) {
+      return res
+        .status(400)
+        .json({ error: true, msg: "Full name is required" });
+    }
+
+    const filter = buildUserFilter(req.user?.id, req.user?.email);
+    if (!filter) {
+      return res.status(401).json({ error: true, msg: "Unauthorized" });
+    }
+
+    await usersCol.updateOne(filter, {
+      $set: {
+        name,
+        phone,
+        bio,
+        image,
+        updatedAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({
+      error: false,
+      msg: "Profile updated",
+    });
+  } catch (err) {
+    console.error("PATCH /user/profile error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to update profile" });
+  }
+});
+
+
+
+
 app.patch(
   "/applications/:id/status",
   verifyToken,
