@@ -15,6 +15,8 @@ const serverUrl = (
   process.env.SERVER_URL || `http://localhost:${port}`
 ).replace(/\/$/, "");
 
+const FREE_TUITION_LIMIT = 2;
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const client = new MongoClient(process.env.MONGO_URI);
 let db;
@@ -180,7 +182,6 @@ app.get("/", (req, res) => {
   res.send("Hello from Mentor Lagbe Server");
 });
 
-// Step 1: Create Stripe Checkout session and return URL to CheckoutCard
 app.post("/checkout", verifyToken, async (req, res) => {
   try {
     const plan =
@@ -190,17 +191,14 @@ app.post("/checkout", verifyToken, async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       customer_email: req.user?.email || undefined,
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
+      line_items: [{ price: priceId, quantity: 1 }],
       metadata: {
         userId: String(req.user?.id || ""),
         userEmail: String(req.user?.email || ""),
         userName: String(req.user?.name || ""),
-        role: String(req.user?.role || (plan === "pro-student" ? "student" : "tutor")),
+        role: String(
+          req.user?.role || (plan === "pro-student" ? "student" : "tutor")
+        ),
         plan,
       },
       success_url: `${serverUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}&plan=${plan}`,
@@ -220,7 +218,6 @@ app.post("/checkout", verifyToken, async (req, res) => {
   }
 });
 
-// Step 2a: Stripe redirects here after successful payment -> saves DB & redirects to Next.js UI with params
 app.get("/payment/success", async (req, res) => {
   const plan = req.query.plan === "pro-student" ? "pro-student" : "pro-tutor";
   const sessionId = String(req.query.session_id || "");
@@ -231,7 +228,6 @@ app.get("/payment/success", async (req, res) => {
 
   try {
     const session = await stripe.checkout.sessions.retrieve(sessionId);
-
     if (session.payment_status !== "paid") {
       return res.redirect(`${clientUrl}/payment/cancel?plan=${plan}`);
     }
@@ -252,42 +248,11 @@ app.get("/payment/success", async (req, res) => {
   }
 });
 
-// Step 2b: Optional POST /payment/success endpoint if called directly from client/server
-app.post("/payment/success", verifyToken, async (req, res) => {
-  try {
-    const sessionId = String(req.body?.sessionId || req.body?.session_id || "");
-    const plan = req.body?.plan === "pro-student" ? "pro-student" : "pro-tutor";
-
-    if (!sessionId) {
-      return res.status(400).json({ error: true, msg: "Missing sessionId" });
-    }
-
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    if (session.payment_status !== "paid") {
-      return res.status(400).json({ error: true, msg: "Payment not paid" });
-    }
-
-    const saved = await savePaymentAndUpgradeUser(session, plan);
-    return res.status(200).json({
-      error: false,
-      msg: "Payment saved and plan upgraded to Pro",
-      data: saved,
-    });
-  } catch (err) {
-    console.error("POST /payment/success error:", err);
-    return res
-      .status(500)
-      .json({ error: true, msg: "Failed to save payment" });
-  }
-});
-
-// Step 2c: Stripe redirects here when user cancels -> redirects to Next.js /payment/cancel
 app.get("/payment/cancel", (req, res) => {
   const plan = req.query.plan === "pro-student" ? "pro-student" : "pro-tutor";
   return res.redirect(`${clientUrl}/payment/cancel?plan=${plan}`);
 });
 
-// Read all transactions from MongoDB Atlas
 app.get("/transactions", verifyToken, async (req, res) => {
   try {
     const database = await connectToMongoDB();
@@ -302,7 +267,7 @@ app.get("/transactions", verifyToken, async (req, res) => {
       userName: d.userName || "Member",
       userEmail: d.userEmail || "",
       role: d.role || "tutor",
-      planName: d.planName || "Pro Tutor",
+      planName: d.planName === "Pro Student" ? "Pro Student" : "Pro Tutor",
       amount: Number(d.amount || 0),
       currency: d.currency || "USD",
       transactionId: d.transactionId || "",
@@ -322,6 +287,54 @@ app.get("/transactions", verifyToken, async (req, res) => {
   }
 });
 
+app.get("/tuitions", async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const docs = await database
+      .collection("tuitions")
+      .find({ approvalStatus: "approved", isActive: { $ne: false } })
+      .sort({ _id: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      error: false,
+      msg: "Tuitions fetched",
+      data: docs,
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to fetch tuitions" });
+  }
+});
+
+app.get("/tuitions/mine", verifyToken, requireRole("tutor"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const docs = await database
+      .collection("tuitions")
+      .find({
+        $or: [
+          { tutorId: String(req.user.id) },
+          ...(req.user.email ? [{ tutorEmail: req.user.email }] : []),
+        ],
+      })
+      .sort({ _id: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      error: false,
+      msg: "Tutor tuitions fetched",
+      data: docs,
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to fetch your tuitions" });
+  }
+});
+
+// Create tuition: checks Pro plan vs Free 2-post limit
 app.post("/tuition", verifyToken, requireRole("tutor"), async (req, res) => {
   try {
     const database = await connectToMongoDB();
@@ -332,16 +345,18 @@ app.post("/tuition", verifyToken, requireRole("tutor"), async (req, res) => {
       .findOne(buildUserFilter(req.user.id, req.user.email));
 
     const isPro = userDoc?.plan === "pro";
-    if (!isPro) {
-      const count = await tuitionsCol.countDocuments({
-        tutorId: req.user.id,
+    const existingCount = await tuitionsCol.countDocuments({
+      $or: [
+        { tutorId: String(req.user.id) },
+        ...(req.user.email ? [{ tutorEmail: req.user.email }] : []),
+      ],
+    });
+
+    if (!isPro && existingCount >= FREE_TUITION_LIMIT) {
+      return res.status(403).json({
+        error: true,
+        msg: `Free plan allows up to ${FREE_TUITION_LIMIT} tuition posts (${existingCount}/${FREE_TUITION_LIMIT} used). Upgrade to Pro for unlimited posts.`,
       });
-      if (count >= 2) {
-        return res.status(403).json({
-          error: true,
-          msg: "Free plan allows up to 2 tuition posts. Upgrade to Pro for unlimited posts.",
-        });
-      }
     }
 
     const newTuition = {
@@ -351,7 +366,8 @@ app.post("/tuition", verifyToken, requireRole("tutor"), async (req, res) => {
       tutorEmail: req.user.email,
       approvalStatus: "pending",
       isActive: true,
-      createdAt: new Date().toISOString(),
+      applicantsCount: 0,
+      createdAt: formatDate(new Date()),
     };
 
     const result = await tuitionsCol.insertOne(newTuition);
@@ -364,6 +380,169 @@ app.post("/tuition", verifyToken, requireRole("tutor"), async (req, res) => {
     console.error("Create tuition error:", err);
     return res.status(500).json({ error: true, msg: "Failed to create tuition" });
   }
+});
+
+app.patch("/tuition/:id", verifyToken, requireRole("tutor"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+    }
+
+    const updated = await database.collection("tuitions").findOneAndUpdate(
+      { _id: new ObjectId(id), tutorId: req.user.id },
+      { $set: { ...req.body, updatedAt: new Date().toISOString() } },
+      { returnDocument: "after" }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: true, msg: "Tuition not found" });
+    }
+
+    return res.status(200).json({ error: false, msg: "Tuition updated" });
+  } catch (err) {
+    return res.status(500).json({ error: true, msg: "Failed to update tuition" });
+  }
+});
+
+app.patch(
+  "/tuition/:id/status",
+  verifyToken,
+  requireRole("tutor"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const { id } = req.params;
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+      }
+
+      const updated = await database.collection("tuitions").findOneAndUpdate(
+        { _id: new ObjectId(id), tutorId: req.user.id },
+        { $set: { isActive: Boolean(req.body?.isActive) } },
+        { returnDocument: "after" }
+      );
+
+      if (!updated) {
+        return res.status(404).json({ error: true, msg: "Tuition not found" });
+      }
+
+      return res.status(200).json({ error: false, msg: "Status updated" });
+    } catch (err) {
+      return res.status(500).json({ error: true, msg: "Failed to update status" });
+    }
+  }
+);
+
+app.delete("/tuition/:id", verifyToken, requireRole("tutor"), async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: true, msg: "Invalid tuition ID" });
+    }
+
+    const deleted = await database
+      .collection("tuitions")
+      .deleteOne({ _id: new ObjectId(id), tutorId: req.user.id });
+
+    if (deleted.deletedCount === 0) {
+      return res.status(404).json({ error: true, msg: "Tuition not found" });
+    }
+
+    return res.status(200).json({ error: false, msg: "Tuition deleted" });
+  } catch (err) {
+    return res.status(500).json({ error: true, msg: "Failed to delete tuition" });
+  }
+});
+
+
+app.get("/user/paid", verifyToken, async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const usersCol = database.collection("user");
+    const paymentsCol = database.collection("payments");
+
+    const userFilter = buildUserFilter(req.user.id, req.user.email);
+    const userDoc = userFilter ? await usersCol.findOne(userFilter) : null;
+
+    const paymentFilter = {
+      $or: [
+        ...(req.user.id ? [{ userId: String(req.user.id) }] : []),
+        ...(req.user.email
+          ? [{ userEmail: String(req.user.email).toLowerCase() }]
+          : []),
+      ],
+    };
+
+    const payments = await paymentsCol
+      .find(paymentFilter)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const isPro = userDoc?.plan === "pro" || payments.length > 0;
+
+    return res.status(200).json({
+      error: false,
+      msg: isPro ? "User has an active Pro plan" : "User is on the Free plan",
+      data: {
+        isPro,
+        plan: isPro ? "pro" : "free",
+        latestPayment: payments[0] || null,
+        payments,
+      },
+    });
+  } catch (err) {
+    console.error("Check user paid status error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to check payment status" });
+  }
+});
+
+app.get("/user", verifyToken, async (req, res) => {
+  // try {
+  const database = await connectToMongoDB();
+  const usersCol = database.collection("user");
+  console.log(req.body)
+  // const user = usersCol
+  //   const userFilter = buildUserFilter(req.user.id, req.user.email);
+  //   const userDoc = userFilter ? await usersCol.findOne(userFilter) : null;
+
+  //   const paymentFilter = {
+  //     $or: [
+  //       ...(req.user.id ? [{ userId: String(req.user.id) }] : []),
+  //       ...(req.user.email
+  //         ? [{ userEmail: String(req.user.email).toLowerCase() }]
+  //         : []),
+  //     ],
+  //   };
+
+  //   const payments = await paymentsCol
+  //     .find(paymentFilter)
+  //     .sort({ createdAt: -1 })
+  //     .toArray();
+
+  //   console.log(payments)
+  //   const isPro = userDoc?.plan === "pro" || payments.length > 0;
+
+  //   return res.status(200).json({
+  //     error: false,
+  //     msg: isPro ? "User has an active Pro plan" : "User is on the Free plan",
+  //     data: {
+  //       isPro,
+  //       plan: isPro ? "pro" : "free",
+  //       latestPayment: payments[0] || null,
+  //       payments,
+  //     },
+  //   });
+  // } catch (err) {
+  //   console.error("Check user paid status error:", err);
+  //   return res
+  //     .status(500)
+  //     .json({ error: true, msg: "Failed to check payment status" });
+  // }
 });
 
 app.listen(port, () => {
