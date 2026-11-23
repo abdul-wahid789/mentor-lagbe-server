@@ -912,6 +912,102 @@ app.patch(
   }
 );
 
+
+app.get(
+  "/transactions",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const paymentsCol = database.collection("payments");
+
+      const docs = await paymentsCol.find({}).sort({ createdAt: -1, _id: -1 }).toArray();
+
+      const formatted = docs.map((doc) => ({
+        id: String(doc._id),
+        _id: String(doc._id),
+        userId: String(doc.userId || ""),
+        userName: String(doc.userName || "Member"),
+        userEmail: String(doc.userEmail || ""),
+        role:
+          doc.role === "tutor" || doc.role === "admin" ? doc.role : "student",
+        plan: String(doc.plan || ""),
+        planName: String(
+          doc.planName ||
+            (doc.plan === "pro-tutor" || doc.role === "tutor"
+              ? "Pro Tutor"
+              : "Pro Student")
+        ),
+        amount: Number(doc.amount || 0),
+        currency: String(doc.currency || "USD").toUpperCase(),
+        transactionId: String(doc.transactionId || ""),
+        status: String(doc.status || "paid"),
+        paidAt: String(doc.paidAt || ""),
+        createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : "",
+      }));
+
+      return res.status(200).json({
+        error: false,
+        msg: "Transactions fetched",
+        data: formatted,
+      });
+    } catch (err) {
+      console.error("GET /transactions error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to fetch transactions" });
+    }
+  }
+);
+
+
+app.patch("/user/role", verifyToken, async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const usersCol = database.collection("user");
+
+    const role = String(req.body?.role || "").trim();
+    if (role !== "student" && role !== "tutor") {
+      return res.status(400).json({
+        error: true,
+        msg: "Please select either student or tutor",
+      });
+    }
+
+    const filter = buildUserFilter(req.user?.id, req.user?.email);
+    if (!filter) {
+      return res.status(401).json({ error: true, msg: "Unauthorized" });
+    }
+
+    const existingUser = await usersCol.findOne(filter);
+    if (!existingUser) {
+      return res.status(404).json({ error: true, msg: "User not found" });
+    }
+
+    // Preserve admin role if already an admin
+    const finalRole = existingUser.role === "admin" ? "admin" : role;
+
+    await usersCol.updateOne(filter, {
+      $set: {
+        role: finalRole,
+        updatedAt: new Date(),
+      },
+    });
+
+    return res.status(200).json({
+      error: false,
+      msg: "Role updated",
+      data: { role: finalRole },
+    });
+  } catch (err) {
+    console.error("PATCH /user/role error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to update role" });
+  }
+});
+
 app.patch("/user/profile", verifyToken, async (req, res) => {
   try {
     const database = await connectToMongoDB();
