@@ -1267,6 +1267,85 @@ app.get("/stats/home", async (req, res) => {
   }
 });
 
+
+app.get("/feedbacks/recent", async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const feedbackCol = database.collection("tuitionFeedbacks");
+    const tuitionsCol = database.collection("tuitions");
+
+    const limit = Math.min(Math.max(Number(req.query?.limit) || 6, 1), 12);
+
+    const [docs, summaryAgg] = await Promise.all([
+      feedbackCol.find({}).sort({ createdAt: -1, _id: -1 }).limit(limit).toArray(),
+      feedbackCol
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              avgRating: { $avg: "$rating" },
+              totalCount: { $sum: 1 },
+            },
+          },
+        ])
+        .toArray(),
+    ]);
+
+    const tuitionIds = Array.from(
+      new Set(
+        docs
+          .map((d) => String(d.tuitionId || ""))
+          .filter((id) => ObjectId.isValid(id))
+      )
+    );
+
+    const tuitions =
+      tuitionIds.length > 0
+        ? await tuitionsCol
+            .find({ _id: { $in: tuitionIds.map((id) => new ObjectId(id)) } })
+            .toArray()
+        : [];
+
+    const tuitionMap = new Map(tuitions.map((t) => [String(t._id), t]));
+
+    const items = docs.map((d) => {
+      const linked = tuitionMap.get(String(d.tuitionId || ""));
+      return {
+        id: String(d._id),
+        tuitionId: String(d.tuitionId || ""),
+        tuitionTitle: String(linked?.title || "Mentorship Session"),
+        subject: String(linked?.subject || "General"),
+        mode: linked?.mode === "Home" ? "Home" : "Online",
+        authorName: String(d.studentName || "Student"),
+        rating: Math.min(5, Math.max(1, Number(d.rating || 5))),
+        comment: String(d.comment || ""),
+        createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : "",
+      };
+    });
+
+    const totalCount = Number(summaryAgg[0]?.totalCount || 0);
+    const averageRating =
+      totalCount > 0 && summaryAgg[0]?.avgRating
+        ? Number(Number(summaryAgg[0].avgRating).toFixed(1))
+        : 4.9;
+
+    return res.status(200).json({
+      error: false,
+      msg: "Recent feedbacks fetched",
+      data: {
+        items,
+        averageRating,
+        totalCount,
+      },
+    });
+  } catch (err) {
+    console.error("GET /feedbacks/recent error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to load recent feedbacks" });
+  }
+});
+
 app.patch(
   "/applications/:id/status",
   verifyToken,
