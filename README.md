@@ -54,29 +54,3 @@ Mentor Lagbe Server is the RESTful backend API powering the **Mentor Lagbe** tui
 | **Feedback & Stats** | `GET /tuitions/:id/feedbacks`, `POST /tuitions/:id/feedbacks`, `GET /feedbacks/recent`, `GET /stats/home` | Public / Authenticated |
 | **Users & Admin** | `GET /user`, `PATCH /user/role`, `PATCH /user/profile`, admin user & tuition moderation routes | Authenticated / Admin |
 
----
-
-## Getting Started
-
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-2. **Configure environment variables:**
-   Create a `.env` file in the root directory:
-   ```env
-   PORT=5000
-   MONGO_URI=your_mongodb_connection_string
-   CLIENT_URL=http://localhost:3000
-   SERVER_URL=http://localhost:5000
-   STRIPE_SECRET_KEY=your_stripe_secret_key
-   ```
-
-3. **Run in development:**
-   ```bash
-   npm run dev
-   ```
-
-4. **Verify server:**
-   Open [http://localhost:5000](http://localhost:5000) — you should see `Hello from Mentor Lagbe Server`.
