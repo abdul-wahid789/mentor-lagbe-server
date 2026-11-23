@@ -683,6 +683,173 @@ app.get(
 );
 
 
+app.get(
+  "/admin/users",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const usersCol = database.collection("user");
+      const docs = await usersCol.find({}).sort({ createdAt: -1 }).toArray();
+
+      const formatted = docs.map((d) => ({
+        id: String(d._id || d.id || ""),
+        name: String(d.name || "Member"),
+        email: String(d.email || ""),
+        role:
+          d.role === "tutor" || d.role === "admin" ? d.role : "student",
+        plan: d.plan === "pro" ? "pro" : "free",
+        phone: String(d.phone || ""),
+        image: String(d.image || ""),
+        createdAt: d.createdAt ? String(d.createdAt) : "",
+      }));
+
+      return res.status(200).json({
+        error: false,
+        msg: "Users fetched",
+        data: formatted,
+      });
+    } catch (err) {
+      console.error("GET /admin/users error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to fetch users" });
+    }
+  }
+);
+
+app.get(
+  "/admin/tuitions",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const tuitionsCol = database.collection("tuitions");
+      const docs = await tuitionsCol.find({}).sort({ _id: -1 }).toArray();
+
+      const formatted = docs.map((d) => ({
+        ...d,
+        _id: String(d._id),
+      }));
+
+      return res.status(200).json({
+        error: false,
+        msg: "All tuitions fetched",
+        data: formatted,
+      });
+    } catch (err) {
+      console.error("GET /admin/tuitions error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to fetch tuitions" });
+    }
+  }
+);
+
+app.patch(
+  "/admin/tuitions/:id/approval",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const tuitionsCol = database.collection("tuitions");
+      const { id } = req.params;
+      const approvalStatus = req.body?.approvalStatus;
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ error: true, msg: "Invalid tuition ID" });
+      }
+
+      if (approvalStatus !== "approved" && approvalStatus !== "rejected") {
+        return res.status(400).json({
+          error: true,
+          msg: "approvalStatus must be approved or rejected",
+        });
+      }
+
+      const result = await tuitionsCol.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            approvalStatus,
+            isActive: approvalStatus === "approved",
+            updatedAt: new Date().toISOString(),
+          },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .json({ error: true, msg: "Tuition not found" });
+      }
+
+      return res.status(200).json({
+        error: false,
+        msg: `Tuition ${approvalStatus}`,
+      });
+    } catch (err) {
+      console.error("PATCH /admin/tuitions/:id/approval error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to update tuition approval" });
+    }
+  }
+);
+
+
+app.patch(
+  "/admin/users/:id/role",
+  verifyToken,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const database = await connectToMongoDB();
+      const usersCol = database.collection("user");
+      const { id } = req.params;
+      const role = req.body?.role;
+
+      if (!["student", "tutor", "admin"].includes(role)) {
+        return res.status(400).json({
+          error: true,
+          msg: "Role must be student, tutor, or admin",
+        });
+      }
+
+      const query = ObjectId.isValid(id)
+        ? { $or: [{ _id: new ObjectId(id) }, { id: String(id) }] }
+        : { id: String(id) };
+
+      const result = await usersCol.updateOne(query, {
+        $set: {
+          role,
+          updatedAt: new Date(),
+        },
+      });
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: true, msg: "User not found" });
+      }
+
+      return res.status(200).json({
+        error: false,
+        msg: "User role updated",
+      });
+    } catch (err) {
+      console.error("PATCH /admin/users/:id/role error:", err);
+      return res
+        .status(500)
+        .json({ error: true, msg: "Failed to update user role" });
+    }
+  }
+);
+
+
 app.patch("/user/profile", verifyToken, async (req, res) => {
   try {
     const database = await connectToMongoDB();
