@@ -1052,7 +1052,220 @@ app.patch("/user/profile", verifyToken, async (req, res) => {
 });
 
 
+app.get("/tuitions/:id/feedbacks", async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const feedbackCol = database.collection("tuitionFeedbacks");
+    const { id } = req.params;
 
+    const docs = await feedbackCol
+      .find({ tuitionId: String(id) })
+      .sort({ createdAt: -1, _id: -1 })
+      .toArray();
+
+    const formatted = docs.map((d) => ({
+      id: String(d._id),
+      _id: String(d._id),
+      tuitionId: String(d.tuitionId),
+      studentId: String(d.studentId || ""),
+      studentName: String(d.studentName || "Student"),
+      studentEmail: String(d.studentEmail || ""),
+      rating: Number(d.rating || 5),
+      comment: String(d.comment || ""),
+      createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : "",
+    }));
+
+    return res.status(200).json({
+      error: false,
+      msg: "Feedbacks fetched",
+      data: formatted,
+    });
+  } catch (err) {
+    console.error("GET /tuitions/:id/feedbacks error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to load feedbacks" });
+  }
+});
+
+app.post("/tuitions/:id/feedbacks", verifyToken, async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const feedbackCol = database.collection("tuitionFeedbacks");
+    const applicationsCol = database.collection("applications");
+    const tuitionsCol = database.collection("tuitions");
+    const { id } = req.params;
+
+    const rating = Number(req.body?.rating);
+    const comment = String(req.body?.comment || "").trim();
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res
+        .status(400)
+        .json({ error: true, msg: "Rating must be between 1 and 5" });
+    }
+
+    if (!comment) {
+      return res
+        .status(400)
+        .json({ error: true, msg: "Feedback comment is required" });
+    }
+
+    const studentEmail = String(req.user?.email || "").toLowerCase();
+    const studentId = String(req.user?.id || "");
+
+    // 1. Verify the student has an approved ("accepted") application for this tuition
+    const approvedApp = await applicationsCol.findOne({
+      tuitionId: String(id),
+      status: "accepted",
+      $or: [
+        ...(studentId ? [{ studentId }] : []),
+        ...(studentEmail ? [{ studentEmail }] : []),
+      ],
+    });
+
+    if (!approvedApp) {
+      return res.status(403).json({
+        error: true,
+        msg: "You can only submit feedback for tuitions where your application was approved.",
+      });
+    }
+
+    // 2. Block duplicate feedback from the same student for the same tuition
+    const existingFeedback = await feedbackCol.findOne({
+      tuitionId: String(id),
+      $or: [
+        ...(studentId ? [{ studentId }] : []),
+        ...(studentEmail ? [{ studentEmail }] : []),
+      ],
+    });
+
+    if (existingFeedback) {
+      return res.status(409).json({
+        error: true,
+        msg: "You have already submitted feedback for this tuition.",
+      });
+    }
+
+    const doc = {
+      tuitionId: String(id),
+      studentId,
+      studentName: String(req.user?.name || "Student"),
+      studentEmail,
+      rating,
+      comment,
+      createdAt: new Date(),
+    };
+
+    const insertResult = await feedbackCol.insertOne(doc);
+
+    // Sync averageRating and reviewCount on the tuition document
+    if (ObjectId.isValid(id)) {
+      const allForTuition = await feedbackCol
+        .find({ tuitionId: String(id) })
+        .toArray();
+      const count = allForTuition.length;
+      const avg =
+        count > 0
+          ? Number(
+              (
+                allForTuition.reduce((s, r) => s + Number(r.rating || 0), 0) /
+                count
+              ).toFixed(1)
+            )
+          : 0;
+
+      await tuitionsCol.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { averageRating: avg, reviewCount: count } }
+      );
+    }
+
+    return res.status(201).json({
+      error: false,
+      msg: "Feedback submitted",
+      data: {
+        id: String(insertResult.insertedId),
+        _id: String(insertResult.insertedId),
+        ...doc,
+        createdAt: doc.createdAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error("POST /tuitions/:id/feedbacks error:", err);
+    return res
+      .status(500)
+      .json({ error: true, msg: "Failed to submit feedback" });
+  }
+});
+
+app.get("/stats/home", async (req, res) => {
+  try {
+    const database = await connectToMongoDB();
+    const usersCol = database.collection("user");
+    const tuitionsCol = database.collection("tuitions");
+    const applicationsCol = database.collection("applications");
+    const feedbackCol = database.collection("tuitionFeedbacks");
+
+    const [tutorCount, approvedTuitionsCount, activeLearnersCount, feedbackSummary] =
+      await Promise.all([
+        usersCol.countDocuments({ role: "tutor" }),
+        tuitionsCol.countDocuments({ approvalStatus: "approved" }),
+        applicationsCol.countDocuments({ status: "accepted" }),
+        feedbackCol
+          .aggregate([
+            {
+              $group: {
+                _id: null,
+                avgRating: { $avg: "$rating" },
+                totalReviews: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray(),
+      ]);
+
+    const avgRating = feedbackSummary[0]?.avgRating
+      ? `${Number(feedbackSummary[0].avgRating).toFixed(1)} / 5`
+      : "4.9 / 5";
+
+    return res.status(200).json({
+      error: false,
+      msg: "Home stats fetched",
+      data: [
+        {
+          label: "Verified tutors",
+          value: tutorCount > 0 ? `${tutorCount.toLocaleString()}+` : "120+",
+        },
+        {
+          label: "Active tuitions",
+          value:
+            approvedTuitionsCount > 0
+              ? `${approvedTuitionsCount.toLocaleString()}+`
+              : "340+",
+        },
+        {
+          label:
+            feedbackSummary[0]?.totalReviews > 0
+              ? `Student rating (${feedbackSummary[0].totalReviews})`
+              : "Student satisfaction",
+          value:
+            feedbackSummary[0]?.totalReviews > 0
+              ? avgRating
+              : activeLearnersCount > 0
+              ? `${activeLearnersCount.toLocaleString()}+`
+              : "98%",
+        },
+      ],
+    });
+  } catch (err) {
+    console.error("GET /stats/home error:", err);
+    return res.status(500).json({
+      error: true,
+      msg: "Failed to fetch home stats",
+    });
+  }
+});
 
 app.patch(
   "/applications/:id/status",
